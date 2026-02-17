@@ -1,0 +1,1 @@
+Jenkins/Laptop -> Terraform -> S3 (tfstate) + DynamoDB (state lock)

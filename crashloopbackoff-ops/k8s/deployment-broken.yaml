@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crash-demo
+  template:
+    metadata:
+      labels:
+        app: crash-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          # This simulates a real app startup check:
+          # if APP_MODE is missing, the container exits with code 1.
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              echo "Starting crash-demo..."
+              if [ -z "$APP_MODE" ]; then
+                echo "ERROR: APP_MODE env var is missing. Exiting."
+                exit 1
+              fi
+              echo "APP_MODE=$APP_MODE"
+              echo "App is running (simulated)."
+              # Keep the container running
+              while true; do echo "healthy"; sleep 10; done
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            exec:
+              command: ["/bin/sh","-c","test -n \"$APP_MODE\""]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["/bin/sh","-c","test -n \"$APP_MODE\""]
+            initialDelaySeconds: 5
+            periodSeconds: 10

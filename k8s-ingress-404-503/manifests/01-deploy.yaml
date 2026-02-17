@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      containers:
+        - name: demo-app
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-text=hello from demo-app"
+            - "-listen=:8080"
+          ports:
+            - containerPort: 8080
+
+
+
+
+
+
+
+
+
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: demo-app
+#   namespace: demo
+# spec:
+#   replicas: 2
+#   selector:
+#     matchLabels:
+#       app: demo
+#   template:
+#     metadata:
+#       labels:
+#         app: demo
+#     spec:
+#       containers:
+#         - name: web
+#           image: hashicorp/http-echo:1.0
+#           args:
+#             - "-text=OK from demo-app"
+#             - "-listen=:8080"
+#           ports:
+#             - containerPort: 8080
+#           readinessProbe:
+#             httpGet:
+#               path: /
+#               port: 8080
+#             initialDelaySeconds: 2
+#             periodSeconds: 5
+#           livenessProbe:
+#             httpGet:
+#               path: /
+#               port: 8080
+#             initialDelaySeconds: 5
+#             periodSeconds: 10

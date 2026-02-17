@@ -1,0 +1,127 @@
+```bash
+# =========================
+# K8s Ops Scenario: Ingress returns 404 or 503
+# Step-by-step CLI (NO files)
+# =========================
+
+# 0) Start Minikube (example)
+minikube start
+minikube addons enable ingress
+
+# Confirm ingress controller is running (Minikube addon)
+kubectl get pods -n ingress-nginx
+kubectl get svc -n ingress-nginx
+
+# 1) Create namespace
+kubectl create namespace demo
+
+# 2) Deploy a simple web app (listens on 8080)
+kubectl -n demo create deployment demo-app --image=hashicorp/http-echo:1.0
+kubectl -n demo set args deployment/demo-app -- -text="OK from demo-app" -listen=":8080"
+
+# Expose container port in the Deployment (patch to add containerPort 8080)
+kubectl -n demo patch deployment demo-app --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/ports","value":[{"containerPort":8080}]}
+]'
+
+# Add readiness + liveness probes (so endpoints become healthy/ready)
+kubectl -n demo patch deployment demo-app --type='json' -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/readinessProbe","value":{"httpGet":{"path":"/","port":8080},"initialDelaySeconds":2,"periodSeconds":5}},
+  {"op":"add","path":"/spec/template/spec/containers/0/livenessProbe","value":{"httpGet":{"path":"/","port":8080},"initialDelaySeconds":5,"periodSeconds":10}}
+]'
+
+# Wait for pods
+kubectl -n demo rollout status deployment/demo-app
+kubectl -n demo get pods -o wide
+
+# 3) Create Service (port 80 -> targetPort 8080)
+kubectl -n demo expose deployment demo-app --name=demo-svc --port=80 --target-port=8080
+kubectl -n demo get svc demo-svc
+kubectl -n demo describe svc demo-svc
+
+# 4) Create Ingress (host: demo.local)
+kubectl -n demo create ingress demo-ingress --class=nginx --rule="demo.local/*=demo-svc:80"
+kubectl -n demo get ingress
+kubectl -n demo describe ingress demo-ingress
+
+# 5) Test access (IMPORTANT: send Host header)
+MINIKUBE_IP=$(minikube ip)
+curl -i -H "Host: demo.local" "http://$MINIKUBE_IP/"
+
+# Optional: open in browser (Minikube IP + add Host mapping if you want)
+echo "Minikube IP: $MINIKUBE_IP"
+# If you want it to work in browser with demo.local:
+# Add to hosts file (run in Windows as admin):
+#   <MINIKUBE_IP> demo.local
+# Then open: http://demo.local
+
+# 6) If you get 404: validate ingress rule/class/host/path
+kubectl -n demo get ingress demo-ingress -o yaml
+kubectl -n demo describe ingress demo-ingress
+
+# Confirm the controller is actually watching and handling ingresses
+kubectl -n ingress-nginx get pods
+kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=200
+
+# 7) If you get 503: validate service ports + endpoints
+kubectl -n demo get svc demo-svc -o yaml
+kubectl -n demo get endpoints demo-svc
+kubectl -n demo describe endpoints demo-svc
+
+# Validate pods are Ready and labels match service selector
+kubectl -n demo get pods --show-labels
+kubectl -n demo describe pod -l app=demo
+
+# 8) Quick inside-cluster test (bypass ingress)
+kubectl -n demo port-forward svc/demo-svc 8080:80
+# In a second terminal:
+curl -i http://localhost:8080/
+
+# 9) Check events (often shows the root cause fast)
+kubectl -n demo get events --sort-by=.metadata.creationTimestamp
+kubectl -n ingress-nginx get events --sort-by=.metadata.creationTimestamp
+
+# =========================
+# SIMULATE 404 ON PURPOSE (wrong host)
+# =========================
+kubectl -n demo create ingress demo-ingress-bad --class=nginx --rule="wrong.local/*=demo-svc:80"
+kubectl -n demo describe ingress demo-ingress-bad
+
+# Test (should return 404 because host doesn't match)
+curl -i -H "Host: demo.local" "http://$MINIKUBE_IP/"
+
+# Fix: delete bad ingress
+kubectl -n demo delete ingress demo-ingress-bad
+
+# =========================
+# SIMULATE 503 ON PURPOSE (wrong targetPort -> no healthy backend)
+# =========================
+kubectl -n demo expose deployment demo-app --name=demo-svc-bad --port=80 --target-port=9999
+
+# Point ingress to the bad service (patch backend service name)
+kubectl -n demo patch ingress demo-ingress --type='json' -p='[
+  {"op":"replace","path":"/spec/rules/0/http/paths/0/backend/service/name","value":"demo-svc-bad"}
+]'
+
+# Test (should return 503)
+curl -i -H "Host: demo.local" "http://$MINIKUBE_IP/"
+
+# Prove endpoints/ports problem
+kubectl -n demo describe svc demo-svc-bad
+kubectl -n demo get endpoints demo-svc-bad
+
+# Fix: point ingress back to the good service
+kubectl -n demo patch ingress demo-ingress --type='json' -p='[
+  {"op":"replace","path":"/spec/rules/0/http/paths/0/backend/service/name","value":"demo-svc"}
+]'
+
+# Test again (should be 200)
+curl -i -H "Host: demo.local" "http://$MINIKUBE_IP/"
+
+# =========================
+# CLEANUP
+# =========================
+kubectl delete namespace demo
+# (optional) stop minikube
+minikube stop
+```

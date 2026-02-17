@@ -1,0 +1,16 @@
+{
+  "Comment": "Point www.lilianebooks.online to EC2 public IP (no app yet)",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "www.lilianebooks.online",
+        "Type": "A",
+        "TTL": 60,
+        "ResourceRecords": [
+          { "Value": "X.X.X.X" }
+        ]
+      }
+    }
+  ]
+}

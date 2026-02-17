@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-demo
+  namespace: ops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crash-demo
+  template:
+    metadata:
+      labels:
+        app: crash-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          ports:
+            - containerPort: 8080
+          env:
+            - name: APP_MODE
+              value: "prod"
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              echo "Starting crash-demo..."
+              if [ -z "$APP_MODE" ]; then
+                echo "ERROR: APP_MODE env var is missing. Exiting."
+                exit 1
+              fi
+              mkdir -p /www
+              echo "OK - APP_MODE=$APP_MODE" > /www/index.html
+              # Start a tiny web server on 8080
+              httpd -f -p 8080 -h /www

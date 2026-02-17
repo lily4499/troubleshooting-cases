@@ -1,0 +1,103 @@
+# ============================================================
+# Kubernetes Troubleshooting Demo: ImagePullBackOff (NO FILES)
+# Real reproducible incident + fix (Minikube or any cluster)
+# Namespace: ops-demo
+# App: web (nginx)
+# ============================================================
+
+# -----------------------------
+# STEP 0 — (Optional) confirm cluster
+# Goal: make sure kubectl is talking to your cluster
+# -----------------------------
+kubectl cluster-info
+kubectl get nodes
+
+# -----------------------------
+# STEP 1 — Create namespace
+# Goal: isolate the demo like a real ops environment
+# -----------------------------
+kubectl create ns ops-demo
+
+# Screenshot command:
+kubectl get ns | grep ops-demo
+
+# -----------------------------
+# STEP 2 — Deploy a broken app (wrong image tag) -> ImagePullBackOff
+# Goal: reproduce the incident on purpose
+# -----------------------------
+kubectl -n ops-demo create deployment web --image=nginx:1.99.99
+kubectl -n ops-demo expose deployment web --port=80 --type=ClusterIP
+
+# Screenshot command:
+kubectl -n ops-demo get pods -o wide
+
+# -----------------------------
+# STEP 3 — Confirm the failure state
+# Goal: prove pods are stuck in ErrImagePull / ImagePullBackOff
+# -----------------------------
+kubectl -n ops-demo get pods
+kubectl -n ops-demo get pods -o wide
+
+# -----------------------------
+# STEP 4 — Describe the pod (events show the real reason)
+# Goal: read the exact pull error (tag not found / unauthorized / timeout)
+# -----------------------------
+POD=$(kubectl -n ops-demo get pods -o jsonpath='{.items[0].metadata.name}')
+echo "$POD"
+
+kubectl -n ops-demo describe pod "$POD"
+
+# Screenshot command (same as above):
+kubectl -n ops-demo describe pod "$POD"
+
+# -----------------------------
+# STEP 5 — Check events (sorted)
+# Goal: see repeated pull failures in real time order
+# -----------------------------
+kubectl -n ops-demo get events --sort-by=.lastTimestamp | tail -n 30
+
+# Optional live watch:
+# kubectl -n ops-demo get events --watch
+
+# -----------------------------
+# STEP 6 — Confirm what image the deployment is trying to pull
+# Goal: verify wrong tag is actually in the deployment spec
+# -----------------------------
+kubectl -n ops-demo get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+kubectl -n ops-demo get deploy web -o yaml | grep -i "image:"
+
+# -----------------------------
+# STEP 7 — Fix the issue (update to a real tag)
+# Goal: correct image tag and trigger rollout
+# -----------------------------
+kubectl -n ops-demo set image deploy/web web=nginx:1.25.3
+
+# -----------------------------
+# STEP 8 — Watch rollout recovery
+# Goal: ensure deployment becomes healthy again
+# -----------------------------
+kubectl -n ops-demo rollout status deploy/web
+kubectl -n ops-demo get pods -o wide
+
+# -----------------------------
+# STEP 9 — Confirm Service endpoints exist again
+# Goal: prove traffic can route (endpoints are back)
+# -----------------------------
+kubectl -n ops-demo get svc web
+kubectl -n ops-demo get endpoints web
+
+# -----------------------------
+# STEP 10 — (Optional) Browser proof with port-forward
+# Goal: show the app works
+# -----------------------------
+kubectl -n ops-demo port-forward svc/web 8080:80
+
+# Open browser:
+# http://localhost:8080
+# Stop port-forward with CTRL+C
+
+# -----------------------------
+# STEP 11 — Cleanup
+# Goal: remove the demo environment
+# -----------------------------
+kubectl delete ns ops-demo

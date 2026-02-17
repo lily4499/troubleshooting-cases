@@ -1,0 +1,118 @@
+```bash
+# 1) Install prerequisites
+sudo apt update
+sudo apt install -y python3
+
+# 2) Create folders
+sudo mkdir -p /opt/myapi
+sudo mkdir -p /etc/myapi
+mkdir -p screenshots
+
+# 3) Create service user + permissions
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin myapi || true
+sudo chown -R myapi:myapi /opt/myapi
+
+# 4) Create the systemd service (unit file)
+sudo tee /etc/systemd/system/myapi.service > /dev/null <<'EOF'
+[Unit]
+Description=myapi - simple API service
+After=network.target
+
+[Service]
+Type=simple
+User=myapi
+WorkingDirectory=/opt/myapi
+EnvironmentFile=/etc/myapi/myapi.env
+ExecStart=/usr/bin/python3 /opt/myapi/app.py
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 5) Reload systemd + enable/start myapi (this will FAIL because env file is missing)
+sudo systemctl daemon-reload
+sudo systemctl enable --now myapi
+
+# 6) Confirm failure
+sudo systemctl status myapi --no-pager -l
+
+# 7) Check logs to see root cause
+sudo journalctl -u myapi -n 120 --no-pager
+
+# 8) Confirm env file is missing (proof)
+sudo ls -l /etc/myapi/myapi.env
+
+# 9) Fix: create env file + secure permissions
+sudo tee /etc/myapi/myapi.env > /dev/null <<'EOF'
+MYAPI_PORT=3000
+MYAPI_MESSAGE=Hello from myapi (fixed)
+EOF
+sudo chown -R root:root /etc/myapi
+sudo chmod 750 /etc/myapi
+sudo chmod 640 /etc/myapi/myapi.env
+
+# 10) Restart myapi
+sudo systemctl restart myapi
+
+# 11) Verify myapi is running
+sudo systemctl status myapi --no-pager -l
+
+# 12) Verify port is listening
+sudo ss -lntp | grep ':3000' || true
+
+# 13) Verify API health response
+curl -s http://localhost:3000/health
+
+# 14) Verify logs are clean after fix
+sudo journalctl -u myapi -n 50 --no-pager
+
+# 15) Prove stability (no restart loop)
+sudo systemctl show myapi -p NRestarts -p ActiveEnterTimestamp
+
+# 16) Screenshot commands (run each and screenshot the output)
+sudo systemctl status myapi --no-pager -l
+sudo journalctl -u myapi -n 120 --no-pager
+sudo ls -l /etc/myapi/myapi.env
+sudo cat /etc/myapi/myapi.env
+sudo ss -lntp | grep ':3000' || true
+curl -s http://localhost:3000/health
+sudo systemctl show myapi -p NRestarts -p ActiveEnterTimestamp
+```
+
+
+--------------------------------------
+
+Here’s the full cleanup (app files + user + systemd unit + env + logs) — 
+
+```bash
+# 1) Stop + disable service
+sudo systemctl stop myapi 2>/dev/null || true
+sudo systemctl disable myapi 2>/dev/null || true
+
+# 2) Remove systemd unit + reload
+sudo rm -f /etc/systemd/system/myapi.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed myapi 2>/dev/null || true
+
+# 3) Remove env/config
+sudo rm -rf /etc/myapi
+
+# 4) Remove application files
+sudo rm -rf /opt/myapi
+
+# 5) Remove the service user (safe even if user doesn't exist)
+sudo userdel myapi 2>/dev/null || true
+
+# 6) Optional: remove logs from journal for THIS unit from your view (journal still keeps history system-wide)
+# (Nothing to delete here unless you vacuum journal; see next command)
+
+# 7) Optional: shrink journal size (be careful; affects all services)
+# sudo journalctl --vacuum-time=3d
+# or:
+# sudo journalctl --vacuum-size=200M
+```
+

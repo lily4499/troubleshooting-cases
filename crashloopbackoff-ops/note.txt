@@ -1,0 +1,111 @@
+```bash
+# =========================
+# CrashLoopBackOff Runbook (No files)
+# Namespace: ops
+# App: crash-demo
+# =========================
+
+# 0) Create namespace
+kubectl create namespace ops
+
+# 1) Deploy a pod that will CrashLoopBackOff (APP_MODE missing)
+kubectl apply -n ops -f - <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crash-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crash-demo
+  template:
+    metadata:
+      labels:
+        app: crash-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh","-c"]
+          args:
+            - |
+              echo "Starting crash-demo..."
+              if [ -z "$APP_MODE" ]; then
+                echo "ERROR: APP_MODE env var is missing. Exiting."
+                exit 1
+              fi
+              echo "APP_MODE=$APP_MODE"
+              while true; do echo "healthy"; sleep 10; done
+          ports:
+            - containerPort: 8080
+EOF
+
+# 2) Create a Service (so we can port-forward later)
+kubectl apply -n ops -f - <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: crash-demo
+spec:
+  selector:
+    app: crash-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+EOF
+
+# 3) Confirm the symptom (CrashLoopBackOff + restarts increasing)
+kubectl get pods -n ops
+kubectl get pods -n ops -w
+
+# 4) Identify the crashing pod
+kubectl get pods -n ops -o wide
+POD=$(kubectl get pods -n ops -l app=crash-demo -o jsonpath='{.items[0].metadata.name}')
+echo "$POD"
+
+# 5) Pull logs (current run)
+kubectl logs -n ops "$POD"
+
+# 6) Pull logs from the previous crash (BEST clue)
+kubectl logs -n ops "$POD" --previous
+
+# 7) Describe pod (exit code + events + reason)
+kubectl describe pod -n ops "$POD"
+
+# 8) Check events sorted (sometimes clearer than describe)
+kubectl get events -n ops --sort-by=.metadata.creationTimestamp
+
+# 9) Check Deployment rollout status (will fail while crashing)
+kubectl rollout status deployment/crash-demo -n ops
+kubectl describe deployment crash-demo -n ops
+
+# 10) FIX (real ops style): add the missing env var to the Deployment
+kubectl set env deployment/crash-demo -n ops APP_MODE=prod
+
+# 11) Watch pods recover (new pod should be Running/Ready)
+kubectl get pods -n ops -w
+
+# 12) Confirm rollout success
+kubectl rollout status deployment/crash-demo -n ops
+kubectl get pods -n ops
+
+# 13) Confirm the env var is present (proof)
+kubectl describe deployment crash-demo -n ops | sed -n '/Environment:/,/Mounts:/p'
+
+# 14) Validate service connectivity (port-forward)
+kubectl get svc -n ops
+kubectl port-forward -n ops svc/crash-demo 8080:80
+
+# Open in browser:
+# http://localhost:8080
+
+
+# =========================
+# Cleanup (optional)
+# =========================
+kubectl delete namespace ops
+```
