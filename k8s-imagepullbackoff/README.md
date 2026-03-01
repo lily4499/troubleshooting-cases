@@ -1,357 +1,324 @@
 
-# Kubernetes Troubleshooting: ImagePullBackOff (Real “Ops” Scenario)
+# Kubernetes Troubleshooting: ImagePullBackOff
 
-When Kubernetes shows **ImagePullBackOff**, it means the node (kubelet) **cannot pull the container image** from the registry.  
-In real ops, this is a production blocker: the Deployment exists, but **pods never start**, so the Service has **zero endpoints**.
+## Context
 
-This README is a **real reproducible example** you can run on **Minikube** and screenshot like a real incident.
+This project demonstrates how I troubleshoot **ImagePullBackOff** in Kubernetes like a real operations incident.
+
+In production, this issue is critical because the Deployment may exist, but the application never becomes available. The pods fail before startup because Kubernetes cannot pull the container image from the registry. That means the Service has no healthy backend pods, users cannot reach the app, and rollout stops at the infrastructure layer before the application even gets a chance to run.
+
+I built this project as a **reproducible Minikube incident simulation** to show how I investigate the failure, identify the exact cause, apply the fix, and verify that service availability is fully restored.
 
 ---
 
 ## Problem
 
-A new deployment was rolled out, but the pods are stuck in:
+A new application rollout was triggered, but the pods never started successfully.
 
-- `ErrImagePull`
-- `ImagePullBackOff`
+Instead of reaching a healthy state, Kubernetes reported:
 
-Users can’t access the app because nothing is running.
+* `ErrImagePull`
+* `ImagePullBackOff`
+
+From an operations perspective, this creates an immediate availability problem:
+
+* the Deployment exists, but workloads are not running
+* the Service has no valid endpoints
+* the application is unreachable
+* repeated pull failures generate noise in events and delay recovery
+
+The core incident question becomes:
+
+**Why is Kubernetes unable to pull the container image?**
 
 ---
 
 ## Solution
 
-I fix ImagePullBackOff in this order:
+I approached the incident using a structured troubleshooting workflow.
 
-1. Confirm the failure (pods)
-2. Read **Events** to get the exact reason
-3. Verify the image name/tag (most common issue)
-4. Verify registry access + credentials (if private)
-5. Restart rollout and confirm service endpoints are healthy again
+First, I confirmed that the pods were failing with **ImagePullBackOff** rather than an application-level crash. Then I inspected the pod details and Kubernetes events to capture the exact pull error. After that, I validated the image configured in the Deployment and confirmed the root cause: the rollout was using an invalid image tag.
+
+I fixed the Deployment by updating it to a valid image tag, monitored the rollout until recovery completed, and verified that the pods became healthy again. Finally, I confirmed that the Service endpoints were restored and that the application was reachable.
+
+This reflects how I handle real incidents: **confirm → collect evidence → identify root cause → fix → verify recovery**.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ![Architecture Diagram](screenshots/architecture.png)
 
+This project uses a simple Kubernetes troubleshooting flow:
+
+* A Deployment attempts to start an NGINX-based application
+* Kubernetes tries to pull the image from the registry
+* The image pull fails because of an invalid tag
+* Pods remain unavailable and the Service has no healthy endpoints
+* After correction, Kubernetes pulls the valid image successfully
+* New pods become Running and Ready
+* Service endpoints recover and traffic can flow again
+
 ---
 
-## Step-by-step CLI 
+## Workflow
 
 ### Scenario
 
-We deploy a simple NGINX app but use a **bad image tag** on purpose to trigger the incident.
+I intentionally deployed a workload with a **bad container image tag** to simulate a realistic rollout failure.
 
-* Namespace: `ops-demo`
-* App: `web`
-* Bad image: `nginx:1.99.99` (tag does not exist → ImagePullBackOff)
-* Fix: update to `nginx:1.25.3` (valid tag)
+Project scope:
 
----
-
-### Prep — Create screenshots folder 
-
-```bash
-mkdir -p screenshots
-```
+* **Namespace:** `ops-demo`
+* **Application:** `web`
+* **Failure introduced:** invalid NGINX image tag
+* **Recovery action:** update Deployment to a valid image tag
+* **Validation target:** healthy pods, restored Service endpoints, working application
 
 ---
 
-### Step 1 — Create namespace (clean ops demo)
+### Step 1 — Isolate the incident in a dedicated namespace
 
-**Goal:** isolate troubleshooting in its own namespace.
+**Goal:** keep the troubleshooting scenario clean and separated from other workloads.
 
-```bash
-kubectl create ns ops-demo
-```
+This step creates an isolated namespace for the incident simulation so all evidence, events, pods, and recovery actions stay contained in one place.
 
-Verify:
-
-```bash
-kubectl get ns | grep ops-demo
-```
-
-**Screenshot — Namespace created**
+**Screenshot:**
 ![Namespace created](screenshots/01-namespace-created.png)
 
 ---
 
-### Step 2 — Deploy the broken app (this creates ImagePullBackOff)
+### Step 2 — Trigger the incident with a broken deployment
 
-**Goal:** reproduce a real incident with a wrong image tag.
+**Goal:** reproduce a real ImagePullBackOff failure.
 
-```bash
-kubectl -n ops-demo create deployment web --image=nginx:1.99.99
-kubectl -n ops-demo expose deployment web --port=80 --type=ClusterIP
-```
+I deployed the application using an image tag that does not exist. This forced Kubernetes into a pull failure scenario and created the exact incident condition I wanted to troubleshoot.
 
-Check pods:
-
-```bash
-kubectl -n ops-demo get pods -o wide
-```
-
-**Screenshot — Pods stuck in ImagePullBackOff**
+**Screenshot:**
 ![Pods ImagePullBackOff](screenshots/02-pods-imagepullbackoff.png)
 
 ---
 
-### Step 3 — Describe the pod and read events (this is the key)
+### Step 3 — Inspect pod events to capture the exact failure reason
 
-**Goal:** get the exact pull error from Kubernetes events.
+**Goal:** collect evidence directly from Kubernetes.
 
-Get pod name:
+This is the most important investigation step. Instead of guessing, I checked the pod details and events to find the exact reason the pull failed. The evidence clearly showed that the requested image could not be found.
 
-```bash
-kubectl -n ops-demo get pods
-```
+That confirms this is not a networking issue inside the app, not a liveness/readiness problem, and not a CrashLoopBackOff case. The failure occurs before the container even starts.
 
-Describe it (copy the pod name from the command above):
-
-```bash
-kubectl -n ops-demo describe pod <pod-name>
-```
-
-In **Events**, you will usually see:
-
-* `Failed to pull image "nginx:1.99.99": ... not found`
-* `ErrImagePull`
-* `ImagePullBackOff`
-
-**Screenshot — Describe pod (Events show image pull failure)**
+**Screenshot:**
 ![Describe pod events](screenshots/03-describe-pod-events.png)
 
 ---
 
-### Step 4 — Confirm what image the Deployment is trying to pull
+### Step 4 — Verify the image configured in the Deployment
 
-**Goal:** verify the wrong tag is really in the deployment spec.
+**Goal:** confirm the wrong image reference is actually in the deployment spec.
 
-```bash
-kubectl -n ops-demo get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-```
+After identifying the pull failure, I verified the image defined in the Deployment. This proves the incident is coming from the workload configuration itself and not from a temporary registry glitch.
 
-Expected:
-
-```text
-nginx:1.99.99
-```
-
-**Screenshot — Deployment image (shows bad tag)**
+**Screenshot:**
 ![Deployment image](screenshots/04-deployment-image.png)
 
 ---
 
-### Step 5 — Check events (sorted) to confirm repeated failures
+### Step 5 — Review repeated cluster events
 
-**Goal:** prove the cluster is repeatedly failing to pull.
+**Goal:** prove the failure is persistent and recurring.
 
-```bash
-kubectl -n ops-demo get events --sort-by=.lastTimestamp | tail -n 30
-```
+I reviewed the event stream to confirm Kubernetes was repeatedly attempting to pull the image and failing. This is useful in real operations because it shows the issue is ongoing and explains why pods never progress to Ready.
 
-**Screenshot — Events sorted (repeated pull failures)**
+**Screenshot:**
 ![Events sorted](screenshots/05-events-sorted.png)
 
 ---
 
-### Step 6 — Fix the issue (update to a real tag)
+### Step 6 — Correct the image and trigger recovery
 
-**Goal:** correct the image tag and trigger a clean rollout.
+**Goal:** replace the bad image reference with a valid one and restart the rollout safely.
 
-```bash
-kubectl -n ops-demo set image deploy/web web=nginx:1.25.3
-kubectl -n ops-demo set image deploy/web nginx=nginx:1.25.3
+Once the root cause was confirmed, I updated the Deployment to use a valid image tag. This allowed Kubernetes to pull the image successfully and begin recreating the workload.
 
-```
-
-Watch rollout:
-
-```bash
-kubectl -n ops-demo rollout status deploy/web
-```
-
-**Screenshot — Rollout status (recovery in progress / success)**
+**Screenshot:**
 ![Rollout status](screenshots/06-rollout-status.png)
 
 ---
 
-### Step 7 — Confirm pods are Running + Ready
+### Step 7 — Verify that pods recover successfully
 
-**Goal:** verify full recovery.
+**Goal:** confirm workloads are now healthy and stable.
 
-```bash
-kubectl -n ops-demo get pods -o wide
-```
+After the fix, I checked that the new pods moved into a healthy state and stayed there. This is the first hard proof that the recovery action worked.
 
-Expected:
-
-* `STATUS: Running`
-* `READY: 2/2`
-
-**Screenshot — Pods Running/Ready**
+**Screenshot:**
 ![Pods ready](screenshots/07-pods-ready.png)
 
 ---
 
-### Step 8 — Confirm Service endpoints exist again
+### Step 8 — Confirm Service endpoints are restored
 
-**Goal:** prove the Service now has healthy endpoints.
+**Goal:** prove the application is now available behind the Service.
 
-```bash
-kubectl -n ops-demo get svc web
-kubectl -n ops-demo get endpoints web
-```
+Healthy pods alone are not enough. I also verified that the Service recovered its endpoints. This matters because it proves traffic now has valid backend targets again.
 
-Expected endpoints should show pod IP(s).
-
-**Screenshot — Service + endpoints recovered**
+**Screenshot:**
 ![Service endpoints](screenshots/08-service-endpoints.png)
 
 ---
 
-### Step 9 — (Optional) Prove the app works (port-forward)
+### Step 9 — Validate the application from the user side
 
-**Goal:** open in browser and show success page.
+**Goal:** confirm the app is reachable and functioning after recovery.
 
-```bash
-kubectl -n ops-demo port-forward svc/web 8080:80
-```
+As a final validation step, I opened the application and confirmed the expected NGINX page loaded successfully. This closes the incident by proving recovery at the user-facing layer, not just the infrastructure layer.
 
-Open browser:
-
-* [http://localhost:8080](http://localhost:8080)
-
-Stop port-forward with:
-
-* `CTRL + C`
-
-**Screenshot — Browser success (NGINX page loads)**
+**Screenshot:**
 ![Browser success](screenshots/09-browser-success.png)
-![alt text](image.png)
----
 
 ---
 
-## Outcome
+## Business Impact
 
-* I reproduced a real ImagePullBackOff failure using a bad image tag
-* I confirmed the root cause using **kubectl describe** + **events**
-* I corrected the deployment image tag and restarted rollout
-* Pods became **Running/Ready**
-* The Service endpoints recovered and the app became reachable again
+This project highlights an important operational skill: diagnosing deployment failures **before they become extended outages**.
+
+In a real environment, **ImagePullBackOff** can block releases, delay incident response, and create confusion because the Deployment object exists even though the application is unavailable. By troubleshooting the issue methodically, I reduce downtime, restore availability faster, and prevent wasted time on the wrong root-cause path.
+
+This project demonstrates that I can:
+
+* quickly identify rollout failures at the Kubernetes layer
+* use platform evidence instead of assumptions
+* isolate whether the issue is image-related, credentials-related, or registry-related
+* apply targeted fixes with minimal disruption
+* verify recovery end-to-end
+
+
 
 ---
 
-## Troubleshooting (Real Ops Checklist)
+## Troubleshooting
 
-### 1) Wrong image tag / repo path (MOST common)
+### Wrong image tag or wrong repository path
 
-**Symptoms**
+This is the most common cause of **ImagePullBackOff**.
 
-* `manifest unknown`
-* `not found`
-* `Failed to pull image ...`
+Typical signs include:
 
-**Fix**
+* image not found
+* manifest unknown
+* repeated pull failures in pod events
+
+The fix is to correct the image reference in the Deployment and verify a clean rollout.
+
+---
+
+### Private registry authentication failure
+
+If the image is stored in a private registry, Kubernetes may fail to pull it because the workload has no valid credentials.
+
+Typical signs include:
+
+* unauthorized
+* authentication required
+* access denied to registry
+
+The fix is to create the correct image pull secret in the same namespace and ensure the workload or service account uses it.
+
+---
+
+### Secret exists in the wrong namespace
+
+A common operational mistake is creating the registry secret in one namespace while the Deployment runs in another.
+
+Typical sign:
+
+* credentials appear to exist, but pulls still fail
+
+The fix is to verify the secret is present in the workload namespace and correctly referenced.
+
+---
+
+### Registry/network/DNS issue
+
+Sometimes the image reference is valid, but the node cannot reach the registry.
+
+Typical signs include:
+
+* timeout errors
+* DNS lookup failures
+* TCP connection failures
+
+In that case, the issue is not with the image itself but with node connectivity, DNS, proxy settings, or registry reachability.
+
+---
+
+### DockerHub or registry rate limiting
+
+Unauthenticated pulls may hit rate limits, especially in shared or repeated lab environments.
+
+Typical signs include:
+
+* too many requests
+* pull denied even with a valid image
+
+The fix is to authenticate pulls or use a production-ready registry strategy.
+
+---
+
+### Old failed pods still visible after the fix
+
+Sometimes the image is corrected, but failed pods remain visible for a short time during rollout.
+
+This can make recovery look incomplete even when the new ReplicaSet is healthy. The correct response is to verify rollout state and confirm that the latest pods are the healthy ones tied to the updated deployment revision.
+
+---
+
+## Useful CLI
+
+### Core incident validation
 
 ```bash
-kubectl -n <ns> set image deploy/<deploy> <container>=<image>:<real-tag>
-kubectl -n <ns> rollout status deploy/<deploy>
+kubectl -n ops-demo get pods -o wide
+kubectl -n ops-demo describe pod <pod-name>
+kubectl -n ops-demo get events --sort-by=.lastTimestamp
+kubectl -n ops-demo get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 ```
 
----
-
-### 2) Private registry auth (unauthorized)
-
-**Symptoms**
-
-* `unauthorized: authentication required`
-
-**Fix (DockerHub example)**
+### Recovery validation
 
 ```bash
-kubectl create secret docker-registry regcred \
-  --docker-server=https://index.docker.io/v1/ \
-  --docker-username='<DOCKERHUB_USERNAME>' \
-  --docker-password='<DOCKERHUB_TOKEN_OR_PASSWORD>' \
-  --docker-email='<EMAIL>' \
-  -n <namespace>
+kubectl -n ops-demo rollout status deploy/web
+kubectl -n ops-demo get pods
+kubectl -n ops-demo get svc web
+kubectl -n ops-demo get endpoints web
 ```
 
-Attach it to the default ServiceAccount:
+### Useful troubleshooting CLI
 
 ```bash
-kubectl patch serviceaccount default -n <namespace> \
-  -p '{"imagePullSecrets": [{"name": "regcred"}]}'
-```
-
-Restart rollout:
-
-```bash
-kubectl rollout restart deploy/<deploy-name> -n <namespace>
-kubectl rollout status deploy/<deploy-name> -n <namespace>
-```
-
----
-
-### 3) Network/DNS problems (registry unreachable)
-
-**Symptoms**
-
-* `i/o timeout`
-* `dial tcp`
-* DNS resolution failures
-
-**Quick checks**
-
-```bash
-kubectl -n kube-system get pods | grep -i coredns
+kubectl -n ops-demo describe deploy web
+kubectl -n ops-demo get rs
+kubectl -n ops-demo get pod <pod-name> -o yaml
+kubectl get secret -n ops-demo
+kubectl -n kube-system get pods
 kubectl -n kube-system logs -l k8s-app=kube-dns --tail=50
+kubectl -n ops-demo rollout history deploy/web
+kubectl -n ops-demo rollout restart deploy/web
 ```
 
----
-
-### 4) DockerHub rate limits
-
-**Symptoms**
-
-* pull denied / too many requests
-
-**Fix**
-
-* Use authenticated pulls (imagePullSecret)
-* Or use another registry (ECR/GCR/ACR) for production-like workflows
-
----
-
-### 5) Secret exists but in the wrong namespace
-
-**Symptoms**
-
-* you created `regcred` but pods still fail
-
-**Fix**
+### Private registry troubleshooting CLI
 
 ```bash
-kubectl get secret -n <namespace>
-```
-
----
-
-### 6) You fixed it but old pods are still stuck
-
-**Fix**
-
-```bash
-kubectl rollout restart deploy/<deploy-name> -n <namespace>
-kubectl rollout status deploy/<deploy-name> -n <namespace>
+kubectl get serviceaccount default -n ops-demo -o yaml
+kubectl get secret regcred -n ops-demo -o yaml
+kubectl describe serviceaccount default -n ops-demo
 ```
 
 ---
 
 ## Cleanup
+
+After completing the troubleshooting exercise, I removed the demo namespace and all related resources to return the cluster to a clean state.
 
 ```bash
 kubectl delete ns ops-demo

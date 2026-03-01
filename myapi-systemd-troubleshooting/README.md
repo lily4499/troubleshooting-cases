@@ -1,335 +1,305 @@
 
-# Linux Ops Scenario: **myapi** systemd Service Failing (systemctl status + journalctl) — From Scratch Problem + Fix
+# Linux Ops Scenario: **myapi** systemd Service Failing
+
+**systemctl status + journalctl — From Scratch Problem + Fix**
+
+## Context
+
+I worked on a Linux Ops scenario where an internal API service called **myapi** stopped running on a server.
+
+This kind of issue matters because when a systemd-managed service fails, users may lose access to the application, other dependent services may also fail, and the server can enter a restart loop if the root cause is not fixed correctly.
+
+In this scenario, I investigated the failure using **systemctl** and **journalctl**, identified the root cause, fixed it, and validated that the service came back healthy and stable.
+
+---
 
 ## Problem
 
-My API service **myapi** went down on a Linux server.  
-Users couldn’t reach the API, and any app depending on it started failing.
+The **myapi** service went down on the Linux server.
 
-When I checked systemd, I saw:
+Because of that:
 
-- `myapi.service` was **failed**
-- systemd was trying to restart it (restart loop)
-- the API port was not listening anymore
+* users could no longer reach the API
+* dependent applications could not communicate with the service
+* the service showed as **failed**
+* systemd was attempting to restart it repeatedly
+* the application port was no longer listening
 
-This is a real Ops situation: **find why it failed**, **fix the root cause**, and **bring it back clean**.
+This is a common Linux operations issue: a service is down, but the important part is not only restarting it — it is finding the **real reason** it failed and fixing that root cause cleanly.
 
 ---
 
 ## Solution
 
-I restored the service by doing this:
+I solved the issue by following a standard Linux operations troubleshooting flow:
 
-1. Confirm failure with `systemctl status myapi`
-2. Read the real error with `journalctl -u myapi`
-3. Reproduce the issue (missing env file = service can’t start)
-4. Fix the root cause (create env file + correct permissions)
-5. Reload systemd (if needed)
-6. Restart service and validate it’s stable
-7. Verify API response with curl
+1. I confirmed the service failure with `systemctl status`
+2. I checked service logs with `journalctl`
+3. I identified the root cause: the service depended on an environment file that was missing
+4. I created the missing configuration file and applied correct permissions
+5. I restarted the service
+6. I validated that the service was running, the port was listening, and the API responded successfully
+7. I confirmed the service was stable and no longer stuck in a restart loop
+
+This restored the API and proved the issue was resolved at the root, not just temporarily masked.
 
 ---
 
-## Architecture Diagram
+## Architecture
 
 ![Architecture Diagram](screenshots/architecture.png)
-![alt text](image.png)
----
 
-## Step-by-step CLI (From Scratch Setup → Break → Fix)
+This setup is simple:
 
-> Ubuntu/Debian style paths shown, but this works the same on most Linux distros (just adjust package manager if needed).
-
-### Step 0) Create a screenshots folder (so you can capture proof as you go)
-
-```bash
-mkdir -p screenshots
-```
+* **systemd** manages the `myapi` service
+* the service runs a Python-based API application
+* the application depends on an external environment file at `/etc/myapi/myapi.env`
+* if that file is missing, systemd cannot start the service correctly
+* logs are reviewed through **journalctl**
+* service state is checked through **systemctl**
+* final validation is done through port checks and an HTTP health request
 
 ---
 
-### Step 1) Create the `myapi` application (simple API)
+## Workflow with Goals + Screenshots
 
-Create app folder:
+### 1. Confirm the service is failing
 
-```bash
-sudo mkdir -p /opt/myapi
-```
+**Goal:** verify that the issue is real and see the first visible failure details.
 
-Create the API code:
+I started by checking the service state in systemd. This showed that `myapi.service` was in a failed state, which confirmed the outage and gave the first indication that the service was not starting successfully.
 
-```bash
-sudo tee /opt/myapi/app.py > /dev/null <<'EOF'
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import os
-
-PORT = int(os.getenv("MYAPI_PORT", "3000"))
-MESSAGE = os.getenv("MYAPI_MESSAGE", "myapi is running")
-
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/health"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write((f'{{"status":"ok","service":"myapi","message":"{MESSAGE}"}}').encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, fmt, *args):
-        return
-
-if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"myapi listening on port {PORT}")
-    server.serve_forever()
-EOF
-```
-
-Install Python (if not already):
-
-```bash
-sudo apt update
-sudo apt install -y python3
-```
-
-Quick manual test (optional):
-
-```bash
-python3 /opt/myapi/app.py
-```
-
-In another terminal:
-
-```bash
-curl -s http://localhost:3000/health
-```
-
-Stop the manual run (Ctrl+C).
-
----
-
-### Step 2) Create a dedicated user for the service
-
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin myapi || true
-sudo chown -R myapi:myapi /opt/myapi
-```
-
----
-
-### Step 3) Create the systemd unit for `myapi`
-
-Create the service file:
-
-```bash
-sudo tee /etc/systemd/system/myapi.service > /dev/null <<'EOF'
-[Unit]
-Description=myapi - simple API service
-After=network.target
-
-[Service]
-Type=simple
-User=myapi
-WorkingDirectory=/opt/myapi
-EnvironmentFile=/etc/myapi/myapi.env
-ExecStart=/usr/bin/python3 /opt/myapi/app.py
-Restart=on-failure
-RestartSec=2
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-Reload systemd and start it:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now myapi
-```
-
----
-
-## The Real Failure (Simulated but realistic)
-
-### Step 4) Service fails because the env file is missing
-
-At this point, **I intentionally didn’t create** `/etc/myapi/myapi.env`.
-
-So the service fails immediately.
-
-Confirm:
-
-```bash
-sudo systemctl status myapi --no-pager -l
-```
-
-**Screenshot — myapi failed (systemctl status)**
+**Screenshot:**
 ![myapi failed status](screenshots/01-myapi-failed-status.png)
 
+**What it should show:**
+
+* `myapi.service` in **failed** state
+* restart attempts or failure result
+* service not active
+
 ---
 
-### Step 5) Check logs to see the real reason
+### 2. Read logs to identify the root cause
 
-```bash
-sudo journalctl -u myapi -n 120 --no-pager
-```
+**Goal:** move from symptom to root cause using service logs.
 
-**Realistic error you will see:**
+After confirming the service failure, I checked the logs with journalctl. The logs showed that systemd could not load the required environment file. This explained why the service could not start.
 
-* `Failed to load environment files: /etc/myapi/myapi.env`
-* `myapi.service: Failed with result 'exit-code'`
-
-This is a super common Ops issue: service depends on config/env file, but it’s missing or permission-blocked.
-
-**Screenshot — journalctl shows missing env file error**
+**Screenshot:**
 ![myapi journalctl error](screenshots/02-myapi-journalctl-error.png)
 
+**What it should show:**
+
+* error related to missing `/etc/myapi/myapi.env`
+* service exited with failure
+* proof that the issue is configuration-related, not just a random crash
+
 ---
 
-## The Fix
+### 3. Verify the missing configuration file
 
-### Step 6) Create the missing env file (root cause fix)
+**Goal:** confirm the root cause before applying the fix.
 
-Create the folder and env file:
+Before fixing the issue, I verified that the environment file was actually missing. This step is important because it confirms the diagnosis before making changes.
 
-```bash
-sudo mkdir -p /etc/myapi
-```
-
-Create the env file:
-
-```bash
-sudo tee /etc/myapi/myapi.env > /dev/null <<'EOF'
-MYAPI_PORT=3000
-MYAPI_MESSAGE=Hello from myapi (fixed)
-EOF
-```
-
-(Optional proof that it was missing before / exists now):
-
-```bash
-sudo ls -l /etc/myapi/myapi.env
-```
-
-**Screenshot — missing/env file check**
+**Screenshot:**
 ![missing env file](screenshots/03-missing-env-file.png)
 
-Show contents:
+**What it should show:**
 
-```bash
-sudo cat /etc/myapi/myapi.env
-```
+* missing file check or failed lookup
+* proof that the expected environment file was not present
 
-**Screenshot — env file created (content)**
+---
+
+### 4. Create the environment file needed by the service
+
+**Goal:** restore the configuration dependency required for startup.
+
+I created the missing environment file with the values the service needed, such as the application port and API message.
+
+**Screenshot:**
 ![env file created](screenshots/04-env-file-created.png)
 
-Secure permissions (real-world hygiene):
+**What it should show:**
 
-```bash
-sudo chown -R root:root /etc/myapi
-sudo chmod 750 /etc/myapi
-sudo chmod 640 /etc/myapi/myapi.env
-```
+* the env file now exists
+* correct variables are defined inside it
 
 ---
 
-### Step 7) Restart the service and confirm it’s healthy
+### 5. Restart the service and confirm it is healthy
 
-Restart and confirm it’s running:
+**Goal:** bring the service back online and verify systemd shows it as running.
 
-```bash
-sudo systemctl restart myapi
-sudo systemctl status myapi --no-pager -l
-```
+Once the missing file was created and permissions were corrected, I restarted the service and checked its state again. This time, systemd showed the service as active and running.
 
-**Screenshot — myapi running (systemctl status)**
+**Screenshot:**
 ![myapi running status](screenshots/05-myapi-running-status.png)
 
-Confirm it’s listening:
+**What it should show:**
 
-```bash
-sudo ss -lntp | grep ':3000' || true
-```
+* `myapi.service` is **active (running)**
+* no immediate failure after restart
 
-**Screenshot — port 3000 is listening**
+---
+
+### 6. Confirm the application port is listening
+
+**Goal:** verify the process is actually serving on the expected port.
+
+A service can appear active, but I still needed to confirm the application was listening on the correct network port. I checked the listening sockets and confirmed port `3000` was open.
+
+**Screenshot:**
 ![port listening](screenshots/06-port-listening.png)
 
-Validate the API response:
+**What it should show:**
 
-```bash
-curl -s http://localhost:3000/health
-```
+* port `3000` listening
+* process bound successfully
 
-**Screenshot — curl health success**
+---
+
+### 7. Validate the API response
+
+**Goal:** confirm the service works from an application point of view, not only a process point of view.
+
+After confirming the service was running and listening, I tested the API health endpoint. The request returned a successful response, which confirmed the application was working properly.
+
+**Screenshot:**
 ![curl health success](screenshots/07-curl-health-success.png)
 
-Re-check logs after fix:
+**What it should show:**
 
-```bash
-sudo journalctl -u myapi -n 50 --no-pager
-```
+* successful health check response
+* expected service message returned
 
-Confirm stability (no restart loop):
+---
 
-```bash
-sudo systemctl show myapi -p NRestarts -p ActiveEnterTimestamp
-```
+### 8. Confirm the service is stable
 
-**Screenshot — restart count + stability proof**
+**Goal:** make sure the fix is durable and the service is no longer restarting repeatedly.
+
+As a final validation step, I checked the service behavior after the fix to confirm there was no restart loop and that the service stayed healthy.
+
+**Screenshot:**
 ![restarts stability](screenshots/08-restarts-stability.png)
-![alt text](image.png)
----
 
-## Outcome
+**What it should show:**
 
-* `myapi` was restored and stayed **Active (running)**
-* Root cause was confirmed using `journalctl` (**missing env file**)
-* Service restarted cleanly without restart loops
-* API health endpoint returned a successful response
-* I captured proof screenshots for documentation and future troubleshooting
+* low or stable restart count
+* proof that the service remained up after the fix
 
 ---
 
-## Troubleshooting (Quick Cheatsheet)
+## Business Impact
 
-### Fast triage
+This issue directly affects service availability.
+
+If this API is down:
+
+* users cannot access the application feature that depends on it
+* internal integrations may fail
+* alerts may increase because health checks fail
+* operations teams lose time if they restart the service without fixing the real cause
+
+By identifying the missing environment file and restoring the service properly, I reduced downtime and restored application availability quickly.
+
+This kind of work shows practical Linux operations skills:
+
+* diagnosing service failures
+* using logs to find root cause
+* fixing configuration issues safely
+* validating stability after recovery
+
+---
+
+## Troubleshooting
+
+Here are the main checks I would use in this type of Linux service incident:
+
+### Service shows failed
+
+Check service state first to confirm whether systemd sees it as failed, inactive, or restarting.
+
+### Service stuck in restart loop
+
+Look at restart counters and recent logs to determine whether the service is repeatedly crashing.
+
+### Missing configuration or environment file
+
+Check whether the service depends on an env file, config file, secret, or path that no longer exists.
+
+### Permission issue
+
+Even if the file exists, the service user may not have permission to read it.
+
+### Port not listening
+
+If the service says running but the port is not open, the process may have started incorrectly or exited immediately after launch.
+
+### App works manually but not under systemd
+
+This usually points to environment differences, wrong working directory, incorrect user, or missing dependency inside the unit configuration.
+
+---
+
+## Useful CLI
+
+### Main investigation commands
 
 ```bash
 sudo systemctl status myapi --no-pager -l
 sudo journalctl -u myapi -n 200 --no-pager
-```
-
-### Service keeps restarting
-
-```bash
-sudo systemctl show myapi -p NRestarts
-sudo journalctl -u myapi -f
-```
-
-### Check unit file + env file
-
-```bash
 sudo systemctl cat myapi
 sudo systemctl show myapi -p EnvironmentFile
-sudo ls -l /etc/myapi/myapi.env
 ```
 
-### Validate the app manually
-
-```bash
-sudo -u myapi /usr/bin/python3 /opt/myapi/app.py
-```
-
-### Confirm port and response
+### Validation commands
 
 ```bash
 sudo ss -lntp | grep ':3000' || true
 curl -s http://localhost:3000/health
+sudo systemctl show myapi -p NRestarts -p ActiveEnterTimestamp
 ```
 
+### Troubleshooting CLI
 
+```bash
+sudo journalctl -u myapi -f
+sudo ls -l /etc/myapi/myapi.env
+sudo cat /etc/myapi/myapi.env
+sudo -u myapi /usr/bin/python3 /opt/myapi/app.py
+sudo systemctl daemon-reload
+sudo systemctl restart myapi
+```
+
+These commands help quickly answer:
+
+* Is the service failed?
+* Why did it fail?
+* Is the config file present?
+* Can the app run correctly?
+* Is the port listening?
+* Is the service stable after restart?
+
+---
+
+## Cleanup
+
+If I want to remove this demo setup after testing, I clean up the service, application files, and environment file.
+
+```bash
+sudo systemctl stop myapi
+sudo systemctl disable myapi
+sudo rm -f /etc/systemd/system/myapi.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/myapi
+sudo rm -rf /etc/myapi
+sudo userdel myapi || true
+```
+
+This removes the demo service and returns the server to a clean state.
+
+---

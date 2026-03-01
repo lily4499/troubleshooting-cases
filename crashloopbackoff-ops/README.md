@@ -1,331 +1,408 @@
 
-# Kubernetes: CrashLoopBackOff (Real “Ops” Scenario)
+# Kubernetes: CrashLoopBackOff
 
-A pod that *should* stay up keeps restarting. I treat this like a real ops issue: I confirm the symptom, collect evidence (`logs`, `describe`, events), identify the root cause, apply a fix, and verify the rollout.
+## Real “Ops” Scenario
+
+## Context
+
+In real operations work, a pod failing once is not the real problem. The real problem is when it keeps restarting, never becomes stable, and the application stays unavailable to users.
+
+This project shows how I handle a **CrashLoopBackOff** issue the same way I would in a real Kubernetes environment: I confirm the symptom, collect evidence, identify the root cause, apply the fix, and verify the workload is healthy again.
+
+The issue I simulated is a very common one in production:
+
+* The application depends on an environment variable called `APP_MODE`
+* That variable is missing
+* The container starts, fails immediately, exits with code `1`, and Kubernetes keeps retrying
+* The pod enters **CrashLoopBackOff**
+* I then fix the configuration and prove the deployment is stable again
 
 ---
 
 ## Problem
 
-In Kubernetes, a pod can enter **CrashLoopBackOff** when the container starts, fails, restarts, fails again… and Kubernetes backs off between retries.
+A Kubernetes pod can enter **CrashLoopBackOff** when the container keeps starting, failing, restarting, and failing again.
 
-What I saw:
+In this situation, the main operational risks are:
 
-- Deployment exists, but pods never stay `Ready`
-- Pod status shows: `CrashLoopBackOff`
-- App is not reachable through the Service
+* the application never becomes available
+* the deployment does not stabilize
+* users cannot reach the service
+* restart count keeps increasing
+* the real root cause is hidden unless logs and events are checked carefully
 
-The key ops question is: **what is the container failing on right after it starts?**
+What I observed in this project:
+
+* the Deployment existed
+* the pod was created
+* the pod never stayed in `Ready`
+* the application was not reachable through the Service
+* Kubernetes kept restarting the container
+
+The key ops question was simple:
+
+**Why is the container failing immediately after startup?**
 
 ---
 
 ## Solution
 
-My workflow is always:
+I followed a practical incident workflow that I use in real operations:
 
-1. **Confirm the crash pattern** (`kubectl get pods -w`)
-2. **Pull the logs** (current + previous crash)
-3. **Describe the pod** to see events, probes, and the exact exit reason
-4. **Identify the root cause** (misconfig, missing env var, bad image, wrong port, permission, etc.)
-5. **Apply the fix** (ConfigMap/Secret/env/command/image/port)
-6. **Verify stability** (pods Ready, no restarts, rollout success)
+* confirm the pod is crashing repeatedly
+* capture evidence from logs and pod events
+* identify the exact failure reason
+* apply the configuration fix
+* verify the rollout succeeds
+* confirm the service is reachable again
 
-For this demo, I simulate a common real-world failure:
+For this demo, the root cause was:
 
-- The app requires an environment variable `APP_MODE`
-- It’s missing, so the app exits with code `1`, causing CrashLoopBackOff
-- Fix: add the missing env var in the Deployment and restart/rollout
+* missing required environment variable: `APP_MODE`
+
+The fix was:
+
+* update the Deployment to provide `APP_MODE=prod`
+
+After the fix:
+
+* the pod stopped crashing
+* the deployment rolled out successfully
+* restarts stopped increasing
+* the service became reachable again
 
 ---
 
-## Architecture Diagram
+## Architecture
+
+This project is intentionally simple so the failure is easy to isolate and explain.
+
+**Architecture flow:**
+
+* A Kubernetes **Deployment** manages the `crash-demo` pod
+* A **Service** exposes the application internally
+* The application requires the `APP_MODE` environment variable at startup
+* When that variable is missing, the container exits immediately
+* Kubernetes restarts the container automatically
+* After the Deployment is corrected, the pod becomes stable and the Service works normally
 
 ![Architecture Diagram](screenshots/architecture.png)
 
-
 ---
 
-## Step-by-step CLI 
+## Workflow
 
-> **Project namespace + app name used below**
+### Goal 1 — Confirm the crash pattern
 
-* Namespace: `ops`
-* App: `crash-demo`
+The first goal was to verify that this was not a one-time restart, but a repeated failure pattern.
 
+I checked the pod state and confirmed:
 
----
+* pod status changed to `CrashLoopBackOff`
+* restarts kept increasing
+* the application never reached a healthy running state
 
-### 1) Reproduce the issue (pod keeps restarting)
-
-```bash
-kubectl create namespace ops
-
-kubectl apply -n ops -f k8s/deployment-broken.yaml
-kubectl apply -n ops -f k8s/service.yaml
-
-kubectl get pods -n ops
-kubectl get pods -n ops -w
-```
-
-Expected symptom:
-
-* `STATUS` becomes `CrashLoopBackOff`
-* `RESTARTS` keeps increasing
-
-**Screenshot — CrashLoopBackOff happening**
-
-> Run the watch command and screenshot the output when you see `CrashLoopBackOff`.
-
-```bash
-kubectl get pods -n ops -w
-```
+**Screenshot goal:** show the pod repeatedly failing and entering `CrashLoopBackOff`.
 
 ![CrashLoopBackOff pods](screenshots/01-crashloop-get-pods.png)
 
 ---
 
-### 2) Quickly confirm which pod is crashing
+### Goal 2 — Collect evidence from logs
 
-```bash
-kubectl get pods -n ops -o wide
-```
+The next goal was to capture the application error directly from container logs.
 
-Copy the pod name (example): `crash-demo-7c8d9c7b6d-abcde`
+This is where I looked for:
 
----
+* startup errors
+* missing configuration
+* application exit messages
+* any clear clue about why the container stopped
 
-### 3) Check logs (current crash)
+The logs showed the startup failure and pointed to the missing required setting.
 
-```bash
-kubectl logs -n ops <pod-name>
-```
-
-**Screenshot — Logs show the failure**
-
-> Screenshot the log output that shows the error message.
+**Screenshot goal:** show the application error from logs.
 
 ![Logs show error](screenshots/02-logs-error.png)
 
 ---
 
-### 4) Check logs from the *previous* container run (super important)
+### Goal 3 — Check the previous container run
 
-When the container restarts fast, the best clues are often in the previous run:
+In CrashLoopBackOff situations, the previous container logs often give the clearest clue because the container may restart too quickly.
 
-```bash
-kubectl logs -n ops crash-demo-7c8d9c7b6d-abcde --previous
-```
+I checked the previous run to confirm the real startup failure and isolate the root cause.
 
-Example failures we might see:
+That evidence confirmed the app was failing because `APP_MODE` was missing.
 
-* “Missing env var APP_MODE”
-* “Cannot connect to DB”
-* “Module not found”
-* “Permission denied”
-* “Bind: address already in use”
-
-**Screenshot — Previous logs (best clue)**
-
-> Screenshot `--previous` output (this is usually the real root-cause clue).
-
-```bash
-kubectl logs -n ops <pod-name> --previous
-```
+**Screenshot goal:** show the previous container logs with the root-cause clue.
 
 ![Previous logs](screenshots/03-logs-previous.png)
 
 ---
 
-### 5) Describe the pod (events + exit reason)
+### Goal 4 — Validate pod events and exit behavior
 
-```bash
-kubectl describe pod -n ops crash-demo-7c8d9c7b6d-abcde
-```
+After checking logs, I reviewed the pod details to confirm:
 
-What I look for inside `describe`:
+* the exit reason
+* the last container state
+* Kubernetes restart behavior
+* back-off events recorded by the scheduler
 
-* **Last State** (Exit Code / Reason)
-* **Events** at the bottom (Back-off restarting failed container)
-* Wrong image / ImagePullBackOff (different issue but still visible here)
-* Probe failures (liveness/readiness killing the pod)
+This step helped confirm that the failure was not networking, image pull, or scheduling related. It was an application startup failure caused by configuration.
 
-**Screenshot — Describe output (exit code + events)**
-
-> Screenshot the “Last State” + the Events at the bottom.
-
-```bash
-kubectl describe pod -n ops <pod-name>
-```
+**Screenshot goal:** show exit reason and restart/back-off events.
 
 ![Describe pod events](screenshots/04-describe-pod-events.png)
 
 ---
 
-### 6) Confirm rollout status (it will usually fail)
+### Goal 5 — Apply the fix
 
-```bash
-kubectl rollout status deployment/crash-demo -n ops
-kubectl describe deployment crash-demo -n ops
-```
+Once I confirmed the root cause, I updated the Deployment to include the missing environment variable.
 
-*(In CrashLoopBackOff cases, rollout often hangs/fails until the root cause is fixed.)*
+This was the recovery step that changed the deployment from unstable to healthy.
 
----
-
-### 7) Fix the root cause (add missing env var)
-
-In this demo: add `APP_MODE=prod` to the deployment.
-
-Option A — apply the fixed manifest:
-
-```bash
-kubectl apply -n ops -f k8s/deployment-fixed.yaml
-```
-
-Option B — patch it directly (real ops style when you need a quick fix):
-
-```bash
-kubectl set env deployment/crash-demo -n ops APP_MODE=prod
-```
-
-**Screenshot — Fix applied**
-
-> Screenshot the command output confirming the env var was set / deployment updated.
-
-```bash
-kubectl set env deployment/crash-demo -n ops APP_MODE=prod
-```
+**Screenshot goal:** show proof that the configuration fix was applied.
 
 ![Fix applied](screenshots/05-fix-applied.png)
 
 ---
 
-### 8) Verify the fix (pods stable + ready)
+### Goal 6 — Verify rollout success
 
-```bash
-kubectl get pods -n ops -w
-kubectl rollout status deployment/crash-demo -n ops
+After the fix, I verified that the deployment recovered correctly.
 
-kubectl get pods -n ops
-kubectl describe pod -n ops <new-pod-name>
-```
+What I wanted to see:
 
-You want:
+* pod moves to `Running`
+* readiness becomes healthy
+* rollout completes successfully
+* restart count stops increasing
 
-* `STATUS: Running`
-* `READY: 1/1`
-* `RESTARTS` stops increasing
-* rollout shows success
+This is the key proof point in ops work: not just applying a fix, but proving the workload is stable after the change.
 
-**Screenshot — Rollout success**
-
-> Screenshot the rollout command when it shows success.
-
-```bash
-kubectl rollout status deployment/crash-demo -n ops
-```
+**Screenshot goal:** show successful rollout after the fix.
 
 ![Rollout success](screenshots/06-rollout-success.png)
 
-**Screenshot — Pods stable (no restarts increasing)**
+---
 
-> Screenshot the pods list showing Running + Ready with stable restarts.
+### Goal 7 — Prove the pod is stable
 
-```bash
-kubectl get pods -n ops
-```
+I then checked the pod again to confirm the service was no longer stuck in a restart loop.
+
+What mattered here:
+
+* stable `Running` status
+* healthy `Ready` state
+* no ongoing restart increase
+
+**Screenshot goal:** show the pod healthy and stable.
 
 ![Pods running](screenshots/07-pods-running.png)
 
 ---
 
-### 9) Validate Service connectivity (port-forward + browser proof)
+### Goal 8 — Validate application reachability
+
+The final goal was to prove that the application was not only running, but actually reachable again.
+
+This closes the incident properly because a pod being “Running” does not always mean the service is usable. I validated the application from the service side as final proof.
+
+**Screenshot goal:** show the application reachable after recovery.
+
+![Browser success](screenshots/08-browser-success.png)
+
+---
+
+## Business Impact
+
+This project reflects a real operational skill that matters in production environments.
+
+By handling CrashLoopBackOff correctly, I can:
+
+* reduce downtime faster during application startup failures
+* identify root cause with evidence instead of guessing
+* separate app issues from Kubernetes platform issues
+* recover deployments safely and verify stability after the fix
+* provide clear proof of diagnosis and resolution for incident review
+
+From a business perspective, this matters because repeated pod crashes can lead to:
+
+* service outage
+* failed releases
+* degraded customer experience
+* delayed deployments
+* wasted engineering time during troubleshooting
+
+This project shows that I do not stop at “the pod is broken.” I follow the full ops path:
+
+**verify → investigate → fix → prove recovery**
+
+---
+
+## Troubleshooting
+
+### Missing or incorrect environment variable
+
+This is one of the most common causes of CrashLoopBackOff in application deployments.
+
+**What I look for:**
+
+* app exits immediately
+* logs show missing configuration
+* exit code is visible in pod details
+
+**Typical signs:**
+
+* missing env var
+* invalid config value
+* ConfigMap or Secret not injected correctly
+
+---
+
+### Application starts but fails health checks
+
+Sometimes the container is technically running, but readiness or liveness checks keep failing and Kubernetes restarts it.
+
+**What I look for:**
+
+* probe failures in pod events
+* wrong path or wrong port
+* application not ready fast enough
+
+---
+
+### Wrong image or image startup behavior
+
+A bad image, wrong tag, or broken startup command can also cause rapid failures.
+
+**What I look for:**
+
+* incorrect image tag
+* missing binary
+* bad entrypoint
+* application crash right after startup
+
+---
+
+### Port mismatch
+
+The application may start on one port while the container spec, probe, or service expects another.
+
+**What I look for:**
+
+* application logs mention listening port
+* service target port does not match
+* readiness probe points to the wrong port
+
+---
+
+### Permissions or filesystem issues
+
+The container may fail if it cannot write to a required path or does not have the correct runtime permissions.
+
+**What I look for:**
+
+* permission denied in logs
+* volume mount problems
+* security context mismatch
+
+---
+
+## Useful CLI
+
+### Core investigation commands
+
+```bash
+kubectl get pods -n ops
+kubectl get pods -n ops -w
+kubectl get pods -n ops -o wide
+kubectl logs -n ops <pod-name>
+kubectl logs -n ops <pod-name> --previous
+kubectl describe pod -n ops <pod-name>
+kubectl rollout status deployment/crash-demo -n ops
+kubectl describe deployment crash-demo -n ops
+```
+
+### Recovery commands
+
+```bash
+kubectl set env deployment/crash-demo -n ops APP_MODE=prod
+kubectl apply -n ops -f k8s/deployment-fixed.yaml
+```
+
+### Validation commands
 
 ```bash
 kubectl get svc -n ops
+kubectl get pods -n ops
+kubectl describe pod -n ops <new-pod-name>
 kubectl -n ops port-forward svc/crash-demo 18080:80 --address 0.0.0.0
-
 ```
-
-Then open:
-
-* `http://localhost:8080`
-
-**Screenshot — Browser proof (port-forward)**
-
-> Screenshot the browser page showing the app is reachable.
-
-![Browser success](screenshots/08-browser-success.png)
-![alt text](image.png)
----
-
-## Outcome
-
-After the fix:
-
-* Pod transitions from `CrashLoopBackOff` → `Running`
-* Deployment rollout completes successfully
-* Restarts stop increasing
-* Service becomes reachable (validated with port-forward + browser test)
-* I have logs + describe output saved as proof of root cause and resolution
 
 ---
 
-## Troubleshooting (what I check fast in real ops)
+## Troubleshoot CLI
 
-### 1) App exits immediately (bad config / missing env var)
-
-* **Signal:** logs show a clear error, exit code `1`
-* **Fix:** correct env vars, ConfigMap/Secret, command args
+### Check latest pod events
 
 ```bash
-kubectl logs -n ops <pod> --previous
-kubectl describe pod -n ops <pod>
-kubectl set env deployment/<deploy> -n ops KEY=value
-```
-
-### 2) Wrong container port / app listening on different port
-
-* **Signal:** app runs but readiness probe fails, or service test fails
-* **Fix:** align containerPort, service targetPort, and app listen port
-
-```bash
-kubectl describe pod -n ops <pod>
-kubectl get svc -n ops -o yaml
-kubectl get deploy -n ops <deploy> -o yaml
-```
-
-### 3) Readiness/Liveness probe killing the container
-
-* **Signal:** events mention probe failure (HTTP 500, timeout)
-* **Fix:** increase initialDelaySeconds, adjust path/port, fix app health endpoint
-
-```bash
-kubectl describe pod -n ops <pod>
-kubectl get deploy -n ops <deploy> -o yaml
-```
-
-### 4) Image issues (ImagePullBackOff vs CrashLoopBackOff)
-
-* **Signal:** can’t pull image or auth issue (usually not CrashLoop)
-* **Fix:** correct image name/tag, registry credentials
-
-```bash
-kubectl describe pod -n ops <pod>
 kubectl get events -n ops --sort-by=.metadata.creationTimestamp
 ```
 
-### 5) Permission / filesystem write errors
-
-* **Signal:** logs show “permission denied”
-* **Fix:** securityContext, runAsUser/fsGroup, correct volume mounts
+### Inspect deployment YAML
 
 ```bash
-kubectl logs -n ops <pod> --previous
-kubectl get pod -n ops <pod> -o yaml
+kubectl get deployment crash-demo -n ops -o yaml
+```
+
+### Inspect service YAML
+
+```bash
+kubectl get svc crash-demo -n ops -o yaml
+```
+
+### Inspect pod YAML
+
+```bash
+kubectl get pod -n ops <pod-name> -o yaml
+```
+
+### Check restart counts quickly
+
+```bash
+kubectl get pods -n ops
+```
+
+### Check container state and exit reason
+
+```bash
+kubectl describe pod -n ops <pod-name>
+```
+
+### Read logs from previous failed run
+
+```bash
+kubectl logs -n ops <pod-name> --previous
 ```
 
 ---
 
-✅ That’s my CrashLoopBackOff runbook the way I actually do it in ops: **verify → collect evidence → root cause → fix → prove it’s stable**.
+## Cleanup
+
+After testing and validating the fix, I clean up the demo resources so the namespace does not keep running unnecessary workloads.
+
+Typical cleanup includes:
+
+* removing the deployment
+* removing the service
+* deleting the test namespace
+* verifying all demo resources are gone
+
+This keeps the cluster clean and avoids leaving failed test workloads behind.
+
+---
 
